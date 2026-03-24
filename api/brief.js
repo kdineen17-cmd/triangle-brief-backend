@@ -1,50 +1,54 @@
-module.exports = async function handler(req, res) { 
-  res.setHeader('Access-Control-Allow-Origin', '*');
+import fetch from "node-fetch";
 
+// Load environment variables (safer than hardcoding keys!)
+const NEWS_API_KEY = process.env.NEWSDATA_API_KEY;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
+export default async function handler(req, res) {
   try {
-    const newsRes = await fetch(
-      `https://newsdata.io/api/1/news?apikey=${process.env.NEWSDATA_API_KEY}&country=us&language=en&category=top`
+    // 1. Fetch latest news
+    const newsResponse = await fetch(
+      `https://newsdata.io/api/1/news?apikey=${NEWS_API_KEY}&language=en`
     );
+    const newsData = await newsResponse.json();
 
-    const news = await newsRes.json();
+    if (!newsData.results || newsData.results.length === 0) {
+      return res.status(404).json({ error: "No news found" });
+    }
 
-    const articles = (news.results || []).slice(0, 5).map(a => ({
-      title: a.title,
-      description: a.description,
-      source: a.source_id
-    }));
+    // Pick top 1–3 articles
+    const topArticles = newsData.results.slice(0, 3);
 
-    const aiRes = await fetch("https://api.openai.com/v1/chat/completions", {
+    // 2. Generate write-up via OpenAI
+    const prompt = `Write a short marketing-style summary for these news headlines in alignment with my brand messaging:\n\n${topArticles
+      .map((a, i) => `${i + 1}. ${a.title} - ${a.link}`)
+      .join("\n")}`;
+
+    const openAIResponse = await fetch("https://api.openai.com/v1/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini",
+        model: "text-davinci-003",
+        prompt,
+        max_tokens: 200,
         temperature: 0.7,
-        messages: [
-          {
-            role: "system",
-            content: `You are a broadcast news writer. Return ONLY JSON.`
-          },
-          {
-            role: "user",
-            content: `Here are today's headlines:\n${JSON.stringify(articles)}`
-          }
-        ]
-      })
+      }),
     });
 
-    const aiData = await aiRes.json();
-    const text = aiData.choices[0].message.content;
+    const openAIData = await openAIResponse.json();
 
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    const parsed = JSON.parse(jsonMatch[0]);
+    const writeUp = openAIData.choices?.[0]?.text?.trim() || "";
 
-    res.status(200).json(parsed);
-
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+    // 3. Return JSON to frontend
+    res.status(200).json({
+      news: topArticles,
+      writeUp,
+    });
+  } catch (error) {
+    console.error("Error in brief.js:", error);
+    res.status(500).json({ error: "Internal server error" });
   }
-};
+}
